@@ -1,9 +1,14 @@
-import time, re
+import time, re, random
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+    WebDriverException,
+)
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.keys import Keys
@@ -22,6 +27,7 @@ class CrawlerJob:
     def __init__(self, url, handler):
         self.url = url
         self.handler = handler
+        self.attempts = 0
         # self.result = None  # 爬取结果，handler 的返回值
         # self.error = None  # 爬取错误信息，handler 抛出的异常
         # self.attempts = 0  # 已尝试爬取次数
@@ -144,16 +150,43 @@ def linkedin_common_crawler(driver, url, time_sleep=1, wait_time=10):
         "jobs": all_job_data
     }
 
-def get_linkedin_job_main_page(driver, url, time_sleep=1, wait_time=10):
+def get_linkedin_job_main_page(driver, url, time_sleep=1, wait_time=10, scroll=False):
     # 访问 LinkedIn 职位搜索主页面，返回 main#main 元素
-    driver.get(url)
-    time.sleep(time_sleep)
+    try:
+        driver.get(url)
+    except TimeoutException as exc:
+        print(f"页面加载超时: {url}")
+        # 强行终止加载，避免 driver 长时间卡住
+        try:
+            driver.execute_script("window.stop();")
+        except WebDriverException:
+            pass
+        raise RuntimeError(f"页面加载超时: {url}") from exc
+    except WebDriverException as exc:
+        print(f"driver.get 发生异常: {url} ({exc})")
+        raise RuntimeError(f"driver.get 失败: {url}") from exc
+
+    time.sleep(time_sleep + random.randint(0, 2))
 
     job_main = wait_get_element(driver, "main#main", timeout=wait_time)
     if not job_main:
         return None
 
+    if scroll:
+        # find scrollable job list container scaffold-layout__list>div
+        scrollable = job_main.find_element(By.CSS_SELECTOR, "div.scaffold-layout__list>div")
+        scroll_height = driver.execute_script("return arguments[0].scrollHeight", scrollable)
+        position = 0
+        step = 300
+
+        while position < scroll_height:
+            position += step
+            driver.execute_script("arguments[0].scrollTo(0, arguments[1]);", scrollable, position)
+            time.sleep(0.1)
+            scroll_height = driver.execute_script("return arguments[0].scrollHeight", scrollable)
+
     return job_main
+
 
 def linkedin_page_crawler(driver, url, time_sleep=1, wait_time=10) -> CrawlerResult:
     # 爬取 LinkedIn 页面，如果大于 1000 则生成批次(url, linkedin_page_crawler)到queue继续爬取，直到页面小于1000或者无法叠加筛选项。
@@ -162,7 +195,7 @@ def linkedin_page_crawler(driver, url, time_sleep=1, wait_time=10) -> CrawlerRes
 
     def generate_paged_urls(base_url, total_jobs):
         paged_urls = []
-        for start in range(0, total_jobs, 25):
+        for start in range(0, min(1000 - 25, total_jobs), 25): # LinkedIn 最多只允许翻到第 1000 条
             paged_url = f"{base_url}&start={start}"
             paged_urls.append(paged_url)
         return paged_urls
@@ -183,18 +216,19 @@ def linkedin_page_crawler(driver, url, time_sleep=1, wait_time=10) -> CrawlerRes
         print("超过 1000 条，生成细化筛选的任务...")
         # 生成细化筛选的任务
         # 先检查已有的筛选项
-        current_filters = re.findall(r"f\.[^&=]+", url)
-        existing_filter_keys = set(f.split(".")[1] for f in current_filters)
+        current_filters = re.findall(r"f_[^&=]+", url)
+        existing_filter_keys = set(current_filters)
         # 可用的细化筛选项
-        available_filters = [f for f in FULL_FILTER_DEFINITIONS if f not in existing_filter_keys]
+        available_filters = [(f[0], f[1].param_key) for f in FULL_FILTER_DEFINITIONS.items() if f[1].param_key not in existing_filter_keys]
         if not available_filters:
             print("没有可用的细化筛选项，直接生成职位详情任务...")
             jobs.extend(CrawlerJob(url, linkedin_job_crawler) for url in generate_paged_urls(url, total_jobs))
             return CrawlerResult(url, jobs, 'list')
 
         # 如果有可用选项，则按照 FULL_FILTER_ORDER 顺序，选择第一个生成新的任务。只生成一个细化筛选任务，避免任务爆炸。
-        next_filter = next((f for f in FULL_FILTER_ORDER if f in available_filters), None)
-        
+        available_filter_names = [f[0] for f in available_filters]
+        next_filter = next((f for f in FULL_FILTER_ORDER if f in available_filter_names), None)
+
         if not next_filter:
             print("没有可用的细化筛选项，直接生成职位详情任务...")
             jobs.extend(CrawlerJob(url, linkedin_job_crawler) for url in generate_paged_urls(url, total_jobs))
@@ -215,7 +249,7 @@ def linkedin_page_crawler(driver, url, time_sleep=1, wait_time=10) -> CrawlerRes
 def linkedin_job_crawler(driver, url, time_sleep=1, wait_time=10) -> CrawlerResult:
     # 爬取 LinkedIn 职位列表页，返回当前页面所有职位数据
     # 返回值: CrawlerResult {url, list[dict], 'detail'}
-    page_data = get_linkedin_job_main_page(driver, url, time_sleep, wait_time)
+    page_data = get_linkedin_job_main_page(driver, url, time_sleep, wait_time, scroll=True)
     if not page_data:
         return CrawlerResult(url, [], 'detail')
 
