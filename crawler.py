@@ -14,7 +14,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.keys import Keys
 
 from url_generator import FULL_FILTER_DEFINITIONS, generate_urls, FULL_FILTER_ORDER, extend_url_with_filter
-from utils import extract_number_results, extract_job_data
+from utils import extract_number_results, extract_job_data, simulate_human_like_actions
 
 import os
 from dotenv import load_dotenv
@@ -152,24 +152,29 @@ def linkedin_common_crawler(driver, url, time_sleep=1, wait_time=10):
 
 def get_linkedin_job_main_page(driver, url, time_sleep=1, wait_time=10, scroll=False):
     # 访问 LinkedIn 职位搜索主页面，返回 main#main 元素
+    timeout_exc = None
     try:
         driver.get(url)
     except TimeoutException as exc:
+        timeout_exc = exc
         print(f"页面加载超时: {url}")
         # 强行终止加载，避免 driver 长时间卡住
         try:
             driver.execute_script("window.stop();")
         except WebDriverException:
             pass
-        raise RuntimeError(f"页面加载超时: {url}") from exc
     except WebDriverException as exc:
         print(f"driver.get 发生异常: {url} ({exc})")
         raise RuntimeError(f"driver.get 失败: {url}") from exc
 
     time.sleep(time_sleep + random.randint(0, 2))
+    simulate_human_like_actions(driver, 1, 2)
 
-    job_main = wait_get_element(driver, "main#main", timeout=wait_time)
+    wait_timeout = wait_time * 2 if timeout_exc is not None else wait_time
+    job_main = wait_get_element(driver, "main#main", timeout=wait_timeout)
     if not job_main:
+        if timeout_exc is not None:
+            raise RuntimeError(f"页面加载超时: {url}") from timeout_exc
         return None
 
     if scroll:
@@ -182,8 +187,11 @@ def get_linkedin_job_main_page(driver, url, time_sleep=1, wait_time=10, scroll=F
         while position < scroll_height:
             position += step
             driver.execute_script("arguments[0].scrollTo(0, arguments[1]);", scrollable, position)
-            time.sleep(0.1)
+            time.sleep(random.uniform(0.1, 0.4))
             scroll_height = driver.execute_script("return arguments[0].scrollHeight", scrollable)
+
+    if timeout_exc is not None:
+        print(f"页面加载超时，但 DOM 已可用: {url}")
 
     return job_main
 
@@ -264,3 +272,4 @@ def linkedin_job_crawler(driver, url, time_sleep=1, wait_time=10) -> CrawlerResu
 
 def linkedin_job_detail_crawler(driver, url, time_sleep=1, wait_time=10):
     pass
+
