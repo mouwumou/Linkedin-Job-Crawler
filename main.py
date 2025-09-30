@@ -1,7 +1,8 @@
-from selenium import webdriver
+﻿from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 import threading
 import queue
 import time
@@ -14,16 +15,52 @@ from cookies import save_cookies, load_cookies
 
 CHROME_DRIVER_PATH = ChromeDriverManager().install()
 
+LOGIN_CHECK_URL = "https://www.linkedin.com/feed/"
+LOGIN_STATUS_KEYWORDS = ("login", "checkpoint")
+
+def _is_session_active(driver) -> bool:
+    auth_cookie = driver.get_cookie("li_at")
+    if not auth_cookie:
+        return False
+    expiry = auth_cookie.get("expiry")
+    if expiry and expiry <= time.time():
+        return False
+    current_url = (driver.current_url or "").lower()
+    if any(keyword in current_url for keyword in LOGIN_STATUS_KEYWORDS):
+        return False
+    if driver.find_elements(By.ID, "username"):  # 登录页的用户名输入框
+        return False
+    return True
+
+def ensure_driver_logged_in(driver, cookies_file: str, *, check_url: str = LOGIN_CHECK_URL) -> None:
+    if _is_session_active(driver):
+        return
+    if check_url:
+        driver.get(check_url)
+        time.sleep(2)
+        if _is_session_active(driver):
+            return
+    print("Detected invalid LinkedIn session, attempting to re-login...")
+    driver.delete_all_cookies()
+    if not login_linkedin_driver(driver):
+        raise RuntimeError("Automatic LinkedIn login failed; please verify credentials")
+    save_cookies(driver, cookies_file)
+    driver.refresh()
+    time.sleep(3)
+    if not _is_session_active(driver):
+        raise RuntimeError("LinkedIn session still invalid after login")
+
+
 
 def init_driver(
     cookies_file: str = "cookies.pkl",
     *,
     headless: bool = False,
-    page_load_timeout: float | None = 30.0,
+    page_load_timeout: float | None = 60.0,
 ):
     options = Options()
 
-    # 禁止浏览器检测自动化行为
+    # 初始化 WebDriver
     options.add_argument("disable-blink-features=AutomationControlled")
 
     # 伪造请求头
@@ -50,16 +87,20 @@ def init_driver(
 
 
     # 载入 cookie
-    if load_cookies(driver, cookies_file):
+    cookies_loaded = load_cookies(driver, cookies_file)
+    if cookies_loaded:
         driver.refresh()
         time.sleep(3)  # 等待页面刷新完成
     else:
-        print("没有 cookies，需要人工登录")
-        # 如果第一次跑，需要人工登录并保存 cookie
-        login_linkedin_driver(driver)
+        print("No valid cookies found; performing interactive login")
+        driver.delete_all_cookies()
+        if not login_linkedin_driver(driver):
+            raise RuntimeError("Automatic LinkedIn login failed; please verify credentials")
         save_cookies(driver, cookies_file)
         driver.refresh()
         time.sleep(3)
+
+    ensure_driver_logged_in(driver, cookies_file)
 
     return driver
 
@@ -73,10 +114,10 @@ def worker(
     cookies_file="cookies.pkl",
     headless=False,
     sleep_min=2.0,
-    sleep_max=5.0,
+    sleep_max=7.0,
     max_attempts=3,
     retry_backoff=10.0,
-    page_load_timeout=30.0,
+    page_load_timeout=60.0,
 ):
     driver = init_driver(
         cookies_file,
@@ -85,16 +126,17 @@ def worker(
     )
     try:
         while True:
-            job = job_queue.get(timeout=60)
+            job = job_queue.get(timeout=20) 
             try:
+                ensure_driver_logged_in(driver, cookies_file)
                 if sleep_max > 0:
                     delay = random.uniform(sleep_min, max(sleep_min, sleep_max))
                     if delay > 0:
                         time.sleep(delay)
 
-                data = job.handler(driver, job.url, time_sleep=3, wait_time=10)
+                data = job.handler(driver, job.url, time_sleep=3, wait_time=60) # set a longer wait_time to ensure not affected by anti-bot
                 if data is None:
-                    raise RuntimeError("handler 返回空结果")
+                    raise RuntimeError("handler returned empty result")
 
                 # use result_router to handle the result
                 result_router(data, job_queue, results, results_lock)
@@ -108,13 +150,13 @@ def worker(
                 if job.attempts < max_attempts:
                     backoff = min(retry_backoff * job.attempts, retry_backoff * 4)
                     print(
-                        f"[Worker {worker_id}] 任务失败 {job.url} ({exc}), 第 {job.attempts} 次重试，{backoff:.1f}s 后重排队"
+                    print(f"[Worker {worker_id}] Job failed {job.url} ({exc}), retry {job.attempts} scheduled in {backoff:.1f}s")
                     )
                     time.sleep(backoff)
                     job_queue.put(job)
                 else:
                     print(
-                        f"[Worker {worker_id}] 任务最终失败 {job.url} ({exc})，已达到最大重试次数"
+                    print(f"[Worker {worker_id}] Job permanently failed {job.url} ({exc}) after maximum retries")
                     )
             finally:
                 job_queue.task_done()
@@ -135,9 +177,9 @@ def run_crawler(
     sleep_max=5.0,
     max_attempts=3,
     retry_backoff=10.0,
-    page_load_timeout=30.0,
+    page_load_timeout=60.0,
 ):
-    """运行爬虫调度"""
+    """Run crawler dispatcher"""
     job_queue = queue.Queue()
     results: list[dict] = []
     results_lock = threading.Lock()
@@ -222,20 +264,20 @@ def main(args):
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser(description="LinkedIn Job Crawler")
-    args.add_argument("--keywords", type=str, required=True, help="搜索关键词")
-    args.add_argument("--states", type=str, nargs="+", help="要爬取的州，默认全部")
-    args.add_argument("--workers", type=int, default=3, help="并发线程数，默认3")
-    args.add_argument("--sleep-min", type=float, default=2.0, help="每个任务前的最小等待秒数")
-    args.add_argument("--sleep-max", type=float, default=5.0, help="每个任务前的最大等待秒数")
-    args.add_argument("--max-attempts", type=int, default=3, help="单个任务最大重试次数")
-    args.add_argument("--retry-backoff", type=float, default=10.0, help="任务失败后的基础退避秒数")
-    args.add_argument("--headless", action="store_true", help="以 headless 模式运行浏览器")
-    args.add_argument("--cookies-file", type=str, default="cookies.pkl", help="cookies 文件路径")
-    args.add_argument("--page-timeout", type=float, default=30.0, help="页面加载超时时间(秒)")
+    args.add_argument("--keywords", type=str, required=True, help="Search keyword")
+    args.add_argument("--states", type=str, nargs="+", help="States to crawl; default is all")
+    args.add_argument("--workers", type=int, default=3, help="Number of worker threads (default 3)")
+    args.add_argument("--sleep-min", type=float, default=2.0, help="Minimum delay before each job in seconds")
+    args.add_argument("--sleep-max", type=float, default=5.0, help="Maximum delay before each job in seconds")
+    args.add_argument("--max-attempts", type=int, default=3, help="Maximum retries per job")
+    args.add_argument("--retry-backoff", type=float, default=10.0, help="Base retry backoff in seconds")
+    args.add_argument("--headless", action="store_true", help="Run Chrome in headless mode")
+    args.add_argument("--cookies-file", type=str, default="cookies.pkl", help="Path to cookies file")
+    args.add_argument("--page-timeout", type=float, default=60.0, help="Page load timeout in seconds")
     args = args.parse_args()
 
-    print("参数:", args)
+    print("Args:", args)
     main(args)
 # Example usage:
 # python main.py --keywords "Software Engineer" --states "California" "New York" --workers 5
-# 以上命令会爬取加州和纽约的 Software Engineer 职位 信息，使用5个并发线程。
+# python main.py --keywords "Data Center" --states "Texas" --workers 1
