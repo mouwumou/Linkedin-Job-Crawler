@@ -134,7 +134,7 @@ def worker(
                     if delay > 0:
                         time.sleep(delay)
 
-                data = job.handler(driver, job.url, time_sleep=3, wait_time=60) # set a longer wait_time to ensure not affected by anti-bot
+                data = job.handler(driver, job.url, time_sleep=4, wait_time=60) # set a longer wait_time to ensure not affected by anti-bot
                 if data is None:
                     raise RuntimeError("handler returned empty result")
 
@@ -232,6 +232,7 @@ def main(args):
     headless = args.headless
     cookies_file = args.cookies_file
     page_load_timeout = args.page_timeout
+    output_file = args.output_file
 
     if sleep_max < sleep_min:
         sleep_max = sleep_min
@@ -256,7 +257,7 @@ def main(args):
     print(f"爬取完成，共获得 {len(results)} 条结果")
 
     # 保存结果
-    save_results(results)
+    save_results(results, output_file=output_file)
 
     # 退出
     print("所有任务完成，退出")
@@ -274,6 +275,7 @@ if __name__ == "__main__":
     args.add_argument("--headless", action="store_true", help="Run Chrome in headless mode")
     args.add_argument("--cookies-file", type=str, default="cookies.pkl", help="Path to cookies file")
     args.add_argument("--page-timeout", type=float, default=60.0, help="Page load timeout in seconds")
+    args.add_argument("--output-file", type=str, default="results.json", help="Output file for results")
     args = args.parse_args()
 
     print("Args:", args)
@@ -281,3 +283,4 @@ if __name__ == "__main__":
 # Example usage:
 # python main.py --keywords "Software Engineer" --states "California" "New York" --workers 5
 # python main.py --keywords "Data Center" --states "Texas" --workers 1
+# python main.py --keywords "Data Center" --states "California" --workers 1
