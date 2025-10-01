@@ -150,27 +150,58 @@ def linkedin_common_crawler(driver, url, time_sleep=1, wait_time=10):
         "jobs": all_job_data
     }
 
-def get_linkedin_job_main_page(driver, url, time_sleep=1, wait_time=10, scroll=False):
-    # 访问 LinkedIn 职位搜索主页面，返回 main#main 元素
+def get_linkedin_job_main_page(driver, url, time_sleep=1, wait_time=10, scroll=False, _refresh_attempt=0):
+    # 获取 LinkedIn 职位搜索页面，返回 main#main 元素
+    previous_main = None
+    try:
+        previous_main = driver.find_element(By.CSS_SELECTOR, "main#main")
+    except NoSuchElementException:
+        previous_main = None
+
     timeout_exc = None
     try:
         driver.get(url)
     except TimeoutException as exc:
         timeout_exc = exc
         print(f"页面加载超时: {url}")
-        # 强行终止加载，避免 driver 长时间卡住
+        # 强制停止加载，避免 driver 长时间卡住
         try:
             driver.execute_script("window.stop();")
         except WebDriverException:
             pass
     except WebDriverException as exc:
-        print(f"driver.get 发生异常: {url} ({exc})")
+        print(f"driver.get 出现异常: {url} ({exc})")
         raise RuntimeError(f"driver.get 失败: {url}") from exc
 
     time.sleep(time_sleep + random.randint(0, 2))
-    simulate_human_like_actions(driver, 1, 2)
 
     wait_timeout = wait_time * 2 if timeout_exc is not None else wait_time
+
+    if timeout_exc is not None and previous_main is not None:
+        try:
+            WebDriverWait(driver, wait_timeout).until(EC.staleness_of(previous_main))
+        except TimeoutException:
+            if _refresh_attempt >= 1:
+                print(f"页面加载超时且 DOM 未刷新，刷新失败: {url}")
+                raise RuntimeError(f"页面加载超时且 DOM 未刷新: {url}") from timeout_exc
+            print(f"页面加载超时且 DOM 未刷新，尝试强制刷新: {url}")
+            try:
+                driver.execute_script("window.stop();")
+            except WebDriverException:
+                pass
+            driver.refresh()
+            time.sleep(random.uniform(1.0, 2.5))
+            return get_linkedin_job_main_page(
+                driver,
+                url,
+                time_sleep=time_sleep,
+                wait_time=wait_time,
+                scroll=scroll,
+                _refresh_attempt=_refresh_attempt + 1,
+            )
+
+    simulate_human_like_actions(driver, 1, 2)
+
     job_main = wait_get_element(driver, "main#main", timeout=wait_timeout)
     if not job_main:
         if timeout_exc is not None:
@@ -191,7 +222,7 @@ def get_linkedin_job_main_page(driver, url, time_sleep=1, wait_time=10, scroll=F
             scroll_height = driver.execute_script("return arguments[0].scrollHeight", scrollable)
 
     if timeout_exc is not None:
-        print(f"页面加载超时，但 DOM 已可用: {url}")
+        print(f"页面加载超时但 DOM 已可用: {url}")
 
     return job_main
 
